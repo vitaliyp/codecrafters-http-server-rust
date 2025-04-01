@@ -12,7 +12,7 @@ fn main() {
         match stream {
             Ok(mut stream) => {
                 println!("accepted new connection");
-                stream.write("HTTP/1.1 OK\r\n\r\n".as_bytes()).unwrap();
+                stream.write("HTTP/1.1 200 OK\r\n\r\n".as_bytes()).unwrap();
             }
             Err(e) => {
                 println!("error: {}", e);
