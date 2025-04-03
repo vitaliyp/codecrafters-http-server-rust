@@ -93,7 +93,7 @@ fn read_request(readable: &mut impl Read) -> Result<Request, String> {
         }
 
         let (k, v) = line.trim_ascii().split_once(":").ok_or("Invalid header")?;
-        headers.insert(String::from(k.trim_ascii()), String::from(v.trim_ascii()));
+        headers.insert(String::from(k.trim_ascii().to_lowercase()), String::from(v.trim_ascii()));
     }
 
     Ok(Request {
@@ -130,6 +130,12 @@ fn main() {
                             (HttpMethod::GET, ["echo", s]) => {
                                 let headers = HashMap::from([("Content-Type", "text/plain")]);
                                 build_response(HttpCode::OK, &headers, &Some(s))
+                            }
+                            (HttpMethod::GET, ["user-agent"]) => {
+                                let headers = HashMap::from([("Content-Type", "text/plain")]);
+                                build_response(HttpCode::OK, &headers, 
+                                               &Some(request.headers.get("user-agent").unwrap())
+                                )
                             }
                             _ => build_response(HttpCode::NOT_FOUND, &HashMap::new(), &None),
                         }
