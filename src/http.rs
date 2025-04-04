@@ -112,23 +112,24 @@ pub fn parse_url(url: &str) -> Vec<&str> {
 pub fn build_response(
     code: HttpCode,
     headers: &HashMap<&str, &str>,
-    content: &Option<&str>,
-) -> String {
-    let content_len: usize = content.map(str::len).iter().sum();
-    let mut response = String::with_capacity(content_len + headers.len() * 32);
+    content: &Option<&[u8]>,
+) -> Vec<u8> {
+    let content_len: usize = content.map(|v| v.len()).iter().sum();
+    let mut response = Vec::with_capacity(content_len + headers.len() * 32);
 
-    write!(response, "HTTP/1.1 {} {}\r\n", code.code_num, code.message).unwrap();
+    response.extend(format!("HTTP/1.1 {} {}\r\n", code.code_num, code.message).as_bytes());
 
     for (key, value) in headers {
-        write!(response, "{}: {}\r\n", key, value).unwrap();
+        response.extend(format!("{}: {}\r\n", key, value).as_bytes());
     }
 
     if let Some(c) = content {
-        write!(response, "Content-Length: {}\r\n", c.len()).unwrap();
-        write!(response, "\r\n{}", c).unwrap();
+        response.extend(format!("Content-Length: {}\r\n", c.len()).as_bytes());
+        response.extend("\r\n".as_bytes());
+        response.extend(*c);
+    } else {
+        response.extend("\r\n".as_bytes());
     }
-
-    response.push_str("\r\n");
 
     response
 }
