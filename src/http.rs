@@ -1,7 +1,15 @@
+use crate::concurrency::ThreadPool;
+use std::cmp::{min, PartialEq};
 use std::collections::HashMap;
-use std::fmt::Write as _;
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
+use std::sync::Arc;
+use std::time::Duration;
+use once_cell::sync::Lazy;
+use regex::{Captures, Regex};
+
+const BUFFER_SIZE: usize = 1024;
 
 pub struct HttpCode {
     pub code_num: u16,
@@ -13,6 +21,10 @@ impl HttpCode {
         code_num: 200,
         message: "OK",
     };
+    pub const CREATED: HttpCode = HttpCode {
+        code_num: 201,
+        message: "Created",
+    };
     pub const BAD_REQUEST: HttpCode = HttpCode {
         code_num: 400,
         message: "Bad Request",
@@ -23,7 +35,7 @@ impl HttpCode {
     };
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum HttpMethod {
     GET,
     POST,
@@ -42,78 +54,229 @@ impl FromStr for HttpMethod {
 }
 
 #[derive(Debug)]
-pub struct Request {
-    pub method: HttpMethod,
-    pub url: String,
-    pub headers: HashMap<String, String>,
-    pub content: Vec<u8>,
+struct InternalReq {
+    method: HttpMethod,
+    url: String,
+    headers: HashMap<String, String>,
+    content: Vec<u8>,
 }
 
-pub fn read_request(readable: &mut impl Read) -> Result<Request, String> {
-    let mut rdr = BufReader::new(readable);
 
-    let mut first_line = String::new();
-    rdr.read_line(&mut first_line)
-        .map_err(|_| "Error while reading line")?;
-    first_line = String::from(first_line.trim_ascii());
+pub struct Request {
+    internal: InternalReq,
+    url_vars: HashMap<String, String>
+}
 
-    let first_line_parts: Vec<&str> = first_line.split(" ").collect();
+impl Request {
+    pub fn headers(&self) -> &HashMap<String, String> {
+        &self.internal.headers
+    }
 
-    let method;
-    let url;
+    pub fn method(&self) -> &HttpMethod {
+        &self.internal.method
+    }
 
-    match first_line_parts[..] {
-        [method_raw, target, version] => {
-            method = HttpMethod::from_str(method_raw).map_err(|_| "Unknown HTTP method")?;
+    pub fn content(&self) -> &[u8] {
+        &self.internal.content
+    }
 
-            if !version.eq("HTTP/1.1") {
-                return Err(String::from("Unsupported HTTP version"));
+    pub fn url_vars(&self) -> &HashMap<String, String> {
+        &self.url_vars
+    }
+
+}
+
+pub struct Response(pub Vec<u8>);
+
+type HandlerFunc = Box<dyn Fn(&Request) -> Response + Sync + Send + 'static>;
+
+pub struct Handler {
+    method: HttpMethod,
+    regex: Regex,
+    f: HandlerFunc,
+}
+
+pub struct Server {
+    listener: TcpListener,
+    handlers: Vec<Handler>,
+    pool: ThreadPool,
+}
+
+
+impl Server {
+    fn new(listener: TcpListener) -> Server {
+        Server {
+            listener,
+            handlers: Vec::new(),
+            pool: ThreadPool::new(10),
+        }
+    }
+
+    pub fn from_tcp_addr(addr: &str) -> Result<Server, &'static str> {
+        let listener = TcpListener::bind(addr).map_err(|_| "Can't bind address")?;
+        Ok(Server::new(
+            listener,
+        ))
+    }
+
+    const PATTERN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<(?P<var>[a-z][a-z0-9]*)>").unwrap());
+
+    pub fn add_handler(&mut self, m: HttpMethod, pattern: &str, f: HandlerFunc) {
+        let pattern = Self::PATTERN_RE.replace_all(pattern, |capt: &Captures|{
+            format!(r"(?<{}>[^/?]+)", capt.name("var").unwrap().as_str())
+        }).to_string();
+        let pattern = format!("^{}$", pattern);
+
+        let compiled = Regex::new(&pattern).unwrap();
+
+        self.handlers.push(Handler {
+            method: m,
+            regex: compiled,
+            f
+        })
+    }
+
+    pub fn run(self) -> Result<(), &'static str> {
+        let server = Arc::new(self);
+        for stream in server.listener.incoming() {
+            let stream = stream.map_err(|_| "Error listening")?;
+            let thread_server = Arc::clone(&server);
+            server.pool.execute(move || thread_server.process_incoming(stream));
+        }
+        Ok(())
+    }
+
+    fn process_incoming(&self, mut stream: TcpStream) {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+
+        println!("accepted new connection: {:?}", stream.peer_addr());
+
+        let request = Self::read_request(&mut stream);
+
+        let response = if let Ok(request) = request {
+            self.dispatch(request)
+        } else {
+            bad_request()
+        };
+
+        stream.write_all(&response.0).unwrap();
+    }
+
+    fn dispatch(&self, req: InternalReq) -> Response {
+        let handler = self.handlers.iter()
+            .map(|h| (h, h.regex.captures(&req.url)))
+            .filter(|(h, c)| h.method == req.method && c.is_some())
+            .next();
+
+        if let Some((handler, Some(capt))) = handler {
+            let url_vars: HashMap<String, String> = handler.regex.capture_names()
+                .flatten()
+                .map(|name| (name.to_string(), capt.name(name).unwrap().as_str().to_string()))
+                .collect();
+
+            let request = Request {
+                internal: req,
+                url_vars,
+            };
+
+            (handler.f)(&request)
+        } else {
+            not_found()
+        }
+    }
+
+
+    fn read_request(readable: &mut impl Read) -> Result<InternalReq, String> {
+        let mut rdr = BufReader::new(readable);
+
+        let mut first_line = String::new();
+        rdr.read_line(&mut first_line)
+            .map_err(|_| "Error while reading line")?;
+        first_line = String::from(first_line.trim_ascii());
+
+        let first_line_parts: Vec<&str> = first_line.split(" ").collect();
+
+        let method;
+        let url;
+
+        match first_line_parts[..] {
+            [method_raw, target, version] => {
+                method = HttpMethod::from_str(method_raw).map_err(|_| "Unknown HTTP method")?;
+
+                if !version.eq("HTTP/1.1") {
+                    return Err(String::from("Unsupported HTTP version"));
+                }
+
+                url = String::from(target);
+            }
+            _ => {
+                return Err(String::from("Bad start-line"));
+            }
+        }
+
+        let mut headers: HashMap<String, String> = HashMap::new();
+        let mut line = String::new();
+
+        loop {
+            line.clear();
+            let n = rdr
+                .read_line(&mut line)
+                .map_err(|e| format!("Can't read line: {}", e))?;
+
+            if n == 0 || line.trim_ascii().is_empty() {
+                break;
             }
 
-            url = String::from(target);
+            let (k, v) = line.trim_ascii().split_once(":").ok_or("Invalid header")?;
+            headers.insert(
+                String::from(k.trim_ascii().to_lowercase()),
+                String::from(v.trim_ascii()),
+            );
         }
-        _ => {
-            return Err(String::from("Bad start-line"));
-        }
+
+        let content = if let Some(content_length_raw) = headers.get("content-length") {
+            let content_length: usize = content_length_raw.parse().map_err(|_| "Invalid header value")?;
+            Self::read_content(&mut rdr, content_length)?
+        } else {
+            Vec::default()
+        };
+
+        let request = InternalReq {
+            method,
+            url,
+            headers,
+            content,
+        };
+        Ok(request)
     }
 
-    let mut headers: HashMap<String, String> = HashMap::new();
-    let mut line = String::new();
+    fn read_content(rdr: &mut BufReader<&mut impl Read>, mut content_length: usize) -> Result<Vec<u8>, String> {
+        let mut content = Vec::with_capacity(content_length);
+        while content_length > 0 {
+            let mut buf: [u8; BUFFER_SIZE] = [0u8; BUFFER_SIZE];
+            let slice_to_read = &mut buf[..min(BUFFER_SIZE, content_length)];
 
-    loop {
-        line.clear();
-        let n = rdr
-            .read_line(&mut line)
-            .map_err(|e| format!("Can't read line: {}", e))?;
-
-        if n == 0 || line.trim_ascii().is_empty() {
-            break;
+            let bytes_read = rdr
+                .read(slice_to_read)
+                .map_err(|_| "Error while reading content")?;
+            if bytes_read == 0 {
+                break;
+            } else {
+                content.extend_from_slice(slice_to_read);
+                content_length -= bytes_read;
+            }
         }
-
-        let (k, v) = line.trim_ascii().split_once(":").ok_or("Invalid header")?;
-        headers.insert(
-            String::from(k.trim_ascii().to_lowercase()),
-            String::from(v.trim_ascii()),
-        );
+        Ok(content)
     }
-
-    Ok(Request {
-        method,
-        url,
-        headers,
-        content: Vec::default(),
-    })
-}
-
-pub fn parse_url(url: &str) -> Vec<&str> {
-    url.strip_prefix("/").unwrap().split("/").collect()
 }
 
 pub fn build_response(
     code: HttpCode,
     headers: &HashMap<&str, &str>,
     content: &Option<&[u8]>,
-) -> Vec<u8> {
+) -> Response {
     let content_len: usize = content.map(|v| v.len()).iter().sum();
     let mut response = Vec::with_capacity(content_len + headers.len() * 32);
 
@@ -131,5 +294,17 @@ pub fn build_response(
         response.extend("\r\n".as_bytes());
     }
 
-    response
+    Response(response)
+}
+
+pub fn ok() -> Response {
+    build_response(HttpCode::OK, &HashMap::new(), &None)
+}
+
+pub fn not_found() -> Response {
+    build_response(HttpCode::NOT_FOUND, &HashMap::new(), &None)
+}
+
+pub fn bad_request() -> Response {
+    build_response(HttpCode::BAD_REQUEST, &HashMap::new(), &None)
 }

@@ -1,95 +1,91 @@
 mod concurrency;
 mod http;
 
-use concurrency::ThreadPool;
-use http::Request;
+use crate::http::{Request, Response, not_found, ok};
 use http::{HttpCode, HttpMethod};
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
-use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::sync::Arc;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let dir = &args.get(2).map(String::from);
+    let dir = Arc::new(args.get(2).map(String::from));
 
-    let pool = ThreadPool::new(10);
-    let listener = TcpListener::bind("127.0.0.1:4221").unwrap();
+    let mut server = http::Server::from_tcp_addr("127.0.0.1:4221").unwrap();
 
-    for stream in listener.incoming() {
-        match stream {
-            Ok(stream) => {
-                let thread_dir = dir.clone();
-                pool.execute(|| process_incoming(stream, thread_dir));
-            }
-            Err(_) => {
-                println!("Error");
-            }
+    server.add_handler(HttpMethod::GET, "/", Box::new(index));
+    server.add_handler(HttpMethod::GET, "/echo/<s>", Box::new(echo));
+    server.add_handler(HttpMethod::GET, "/user-agent", Box::new(user_agent));
+
+    let dir_clone = Arc::clone(&dir);
+    server.add_handler(
+        HttpMethod::GET,
+        "/files/<file>",
+        Box::new(move |r| get_file(r, dir_clone.as_ref())),
+    );
+
+    let dir_clone = Arc::clone(&dir);
+    server.add_handler(
+        HttpMethod::POST,
+        "/files/<file>",
+        Box::new(move |r| post_file(r, dir_clone.as_ref())),
+    );
+
+    server.run().unwrap();
+}
+
+fn index(r: &Request) -> Response {
+    ok()
+}
+
+fn echo(r: &Request) -> Response {
+    let s = r.url_vars().get("s").unwrap();
+    let headers = HashMap::from([("Content-Type", "text/plain")]);
+    http::build_response(HttpCode::OK, &headers, &Some(s.as_bytes()))
+}
+
+fn user_agent(r: &Request) -> Response {
+    let headers = HashMap::from([("Content-Type", "text/plain")]);
+    http::build_response(
+        HttpCode::OK,
+        &headers,
+        &Some(r.headers().get("user-agent").unwrap().as_bytes()),
+    )
+}
+
+fn get_file(r: &Request, dir: &Option<String>) -> Response {
+    if let Some(dir) = dir {
+        let file_name = r.url_vars().get("file").unwrap();
+
+        let mut file_path = PathBuf::from(dir);
+        let file_name = Path::new(file_name);
+        file_path.extend(file_name);
+
+        let content = fs::read(file_path);
+        match content {
+            Ok(content) => http::build_response(
+                HttpCode::OK,
+                &HashMap::from([("Content-Type", "application/octet-stream")]),
+                &Some(&content),
+            ),
+            Err(_) => not_found(),
         }
+    } else {
+        not_found()
     }
 }
 
-fn process_incoming(mut stream: TcpStream, dir: Option<String>) {
-    stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+fn post_file(r: &Request, dir: &Option<String>) -> Response {
+    if let Some(dir) = dir {
+        let file_name = r.url_vars().get("file").unwrap();
 
-    println!("accepted new connection: {:?}", stream.peer_addr());
+        let mut path = PathBuf::from(dir);
+        path.extend(Path::new(file_name));
 
-    let request = http::read_request(&mut stream).unwrap();
-    println!("{request:?}");
-
-    let response = dispatch(&request, &dir);
-
-    stream.write(&response).unwrap();
-}
-
-fn dispatch(request: &Request, dir: &Option<String>) -> Vec<u8> {
-    let url_parts = http::parse_url(&request.url);
-
-    match (&request.method, &url_parts[..]) {
-        (HttpMethod::GET, [""]) => http::build_response(HttpCode::OK, &HashMap::new(), &None),
-
-        (HttpMethod::GET, ["echo", s]) => {
-            let headers = HashMap::from([("Content-Type", "text/plain")]);
-            http::build_response(HttpCode::OK, &headers, &Some(s.as_bytes()))
-        }
-
-        (HttpMethod::GET, ["user-agent"]) => {
-            let headers = HashMap::from([("Content-Type", "text/plain")]);
-            http::build_response(
-                HttpCode::OK,
-                &headers,
-                &Some(request.headers.get("user-agent").unwrap().as_bytes()),
-            )
-        }
-        (HttpMethod::GET, ["files", file_name]) => {
-            if dir.is_none() {
-                return http::build_response(HttpCode::NOT_FOUND, &HashMap::new(), &None)
-            }
-            
-            let dir = dir.as_ref().unwrap();
-            
-            let mut file_path = PathBuf::from(dir);
-            let file_name = Path::new(file_name);
-            file_path.extend(file_name);
-            
-            let content = fs::read(file_path);
-            match content {
-                Ok(content) => {
-                    http::build_response(
-                        HttpCode::OK,
-                        &HashMap::from([("Content-Type", "application/octet-stream")]),
-                        &Some(&content),
-                    )
-                }
-                Err(_) => {
-                    http::build_response(HttpCode::NOT_FOUND, &HashMap::new(), &None)
-                }
-            }
-        }
-        _ => http::build_response(HttpCode::NOT_FOUND, &HashMap::new(), &None),
+        fs::write(path, &r.content()).unwrap();
+        http::build_response(HttpCode::CREATED, &HashMap::new(), &None)
+    } else {
+        not_found()
     }
 }
