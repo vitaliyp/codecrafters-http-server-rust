@@ -1,6 +1,9 @@
-use crate::http::handler::HandlerFunc;
 use crate::http::Response;
+use crate::http::handler::HandlerFunc;
 use crate::http::request::RequestContext;
+use compression::Middleware;
+
+pub mod compression;
 
 pub struct Next<'a> {
     pub(crate) middlewares: &'a [Box<dyn Middleware>],
@@ -19,8 +22,4 @@ impl<'a> Next<'a> {
             (self.handler)(ctx)
         }
     }
-}
-
-pub trait Middleware: Send + Sync {
-    fn handle(&self, ctx: &mut RequestContext, next: Next) -> Response;
 }

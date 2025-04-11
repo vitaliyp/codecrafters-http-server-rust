@@ -1,6 +1,9 @@
 use crate::concurrency::ThreadPool;
 use crate::http;
+use crate::http::handler::HandlerFunc;
 use crate::http::method::Method;
+use crate::http::middleware::Next;
+use crate::http::middleware::compression::{CompressionMw, Middleware};
 use crate::http::request::{Request, RequestContext};
 use crate::http::{BUFFER_SIZE, Response};
 use anyhow::{Context, anyhow, bail};
@@ -13,9 +16,6 @@ use std::net::{TcpListener, TcpStream};
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
-use crate::http::handler::HandlerFunc;
-use crate::http::middleware::{Middleware, Next};
-
 
 pub struct Handler {
     method: Method,
@@ -32,12 +32,15 @@ pub struct Server {
 
 impl Server {
     fn new(listener: TcpListener, num_workers: usize) -> Server {
-        Server {
+        let mut s = Server {
             listener,
             handlers: Vec::new(),
             pool: ThreadPool::new(num_workers),
             middlewares: Vec::new(),
-        }
+        };
+
+        s.add_middleware(Box::new(CompressionMw {}));
+        s
     }
 
     pub fn from_tcp_addr(addr: &str, num_workers: usize) -> Result<Server, &'static str> {
@@ -95,7 +98,9 @@ impl Server {
             http::bad_request()
         };
 
-        stream.write_all(serialize_response(&response).as_ref()).unwrap();
+        stream
+            .write_all(serialize_response(&response).as_ref())
+            .unwrap();
     }
 
     fn dispatch(&self, req: Request) -> Response {
@@ -103,8 +108,7 @@ impl Server {
             .handlers
             .iter()
             .map(|h| (h, h.regex.captures(&req.url)))
-            .filter(|(h, c)| h.method == req.method && c.is_some())
-            .next();
+            .find(|(h, c)| h.method == req.method && c.is_some());
 
         if let Some((handler, Some(capt))) = handler {
             let vars = Self::get_url_vars(handler, capt);
@@ -121,7 +125,7 @@ impl Server {
         }
     }
 
-    fn get_url_vars(handler: &Handler, capt: Captures) -> HashMap<String, String>{
+    fn get_url_vars(handler: &Handler, capt: Captures) -> HashMap<String, String> {
         handler
             .regex
             .capture_names()
@@ -178,10 +182,7 @@ impl Server {
                 .trim_ascii()
                 .split_once(":")
                 .ok_or(anyhow!("Invalid header"))?;
-            headers.insert(
-                String::from(k.trim_ascii().to_lowercase()),
-                String::from(v.trim_ascii()),
-            );
+            headers.insert(k.trim_ascii().to_lowercase(), String::from(v.trim_ascii()));
         }
 
         let content = if let Some(content_length_raw) = headers.get("content-length") {
@@ -191,19 +192,6 @@ impl Server {
         } else {
             Vec::default()
         };
-
-        // let encodings = headers
-        //     .get("accept-encoding")
-        //     .map(|v| parse_accept_encoding(v))
-        //     .unwrap_or_else(|| {
-        //         Ok(HashMap::from([(
-        //             Encoding::Identity,
-        //             EncodingVal {
-        //                 encoding: Encoding::Identity,
-        //                 quality: 1.0,
-        //             },
-        //         )]))
-        //     })?;
 
         let request = Request {
             method,

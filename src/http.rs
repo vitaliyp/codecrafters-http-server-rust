@@ -1,31 +1,35 @@
-pub mod status;
+mod encoding;
+mod handler;
 pub mod method;
+mod middleware;
 pub mod request;
 pub mod server;
-mod encoding;
-mod parse;
-mod middleware;
-mod handler;
+pub mod status;
 
-use std::collections::HashMap;
 use status::Status;
+use std::collections::HashMap;
 
 const BUFFER_SIZE: usize = 1024;
-
 
 pub struct Response {
     status: Status,
     headers: HashMap<String, String>,
-    content: Option<Vec<u8>> 
+    content: Option<Vec<u8>>,
 }
 
 impl Response {
-    pub(crate) fn from_parts(status: Status, headers: HashMap<String, String>, content: Option<Vec<u8>>) -> Self {
-        Self { status, headers, content }
+    pub(crate) fn from_parts(
+        status: Status,
+        headers: HashMap<String, String>,
+        content: Option<Vec<u8>>,
+    ) -> Self {
+        Self {
+            status,
+            headers,
+            content,
+        }
     }
 }
-
-
 
 pub fn ok() -> Response {
     Response::from_parts(Status::OK, HashMap::new(), None)

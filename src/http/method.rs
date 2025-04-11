@@ -7,4 +7,3 @@ pub enum Method {
     #[strum(serialize = "POST")]
     POST,
 }
-

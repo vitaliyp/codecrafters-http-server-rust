@@ -1,8 +1,4 @@
-use crate::http::request::{Request, RequestContext};
 use crate::http::Response;
+use crate::http::request::RequestContext;
 
-// pub trait Handler: Send + Sync {
-//     fn handle(&self, ctx: &RequestContext) -> Response;
-// }
-
-pub type HandlerFunc = Box<dyn Fn(&RequestContext) -> Response + Sync + Send + 'static>;
+pub type HandlerFunc = Box<dyn Fn(&RequestContext) -> Response + Sync + Send>;

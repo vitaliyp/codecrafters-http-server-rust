@@ -1,6 +1,6 @@
+use crate::http::method::Method;
 use std::any::{Any, TypeId};
 use std::collections::HashMap;
-use crate::http::method::Method;
 
 #[derive(Debug)]
 pub(crate) struct RequestContext {
@@ -17,15 +17,18 @@ impl RequestContext {
             url_vars,
         }
     }
-    
-    pub fn get_var(&self, k: &str) -> Option<&str>{
+
+    pub fn get_var(&self, k: &str) -> Option<&str> {
         self.url_vars.get(k).map(|v| v.as_str())
     }
-    
+
     pub fn get_header(&self, k: &str) -> Option<&str> {
-        self.request.headers.get(&k.to_lowercase()).map(|v| v.as_str())
+        self.request
+            .headers
+            .get(&k.to_lowercase())
+            .map(|v| v.as_str())
     }
-    
+
     pub fn request(&self) -> &Request {
         &self.request
     }

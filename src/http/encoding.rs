@@ -1,6 +1,6 @@
-use strum::EnumString;
+use strum::{Display, EnumString, IntoStaticStr};
 
-#[derive(EnumString, Debug, PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(EnumString, IntoStaticStr, Debug, PartialEq, Eq, Hash, Clone, Copy, Display)]
 pub enum Encoding {
     #[strum(serialize = "gzip")]
     Gzip,

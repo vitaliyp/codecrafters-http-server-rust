@@ -1,15 +1,15 @@
 mod concurrency;
 mod http;
 
-use crate::http::{not_found, ok, Response};
+use crate::http::request::RequestContext;
+use crate::http::{Response, not_found, ok};
 use http::method::Method;
+use http::server;
+use http::status::Status;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use http::server;
-use http::status::Status;
-use crate::http::request::RequestContext;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
@@ -44,19 +44,20 @@ fn index(_r: &RequestContext) -> Response {
 
 fn echo(r: &RequestContext) -> Response {
     let s = r.get_var("s").unwrap();
-    
-    let headers = HashMap::from(
-        [("Content-Type".to_string(), "text/plain".to_string())]);
-    
+
+    let headers = HashMap::from([("Content-Type".to_string(), "text/plain".to_string())]);
+
     Response::from_parts(Status::OK, headers, Some(s.as_bytes().to_vec()))
 }
 
 fn user_agent(r: &RequestContext) -> Response {
-    let headers = HashMap::from(
-        [("Content-Type".to_string(), "text/plain".to_string())]);
-    
-    Response::from_parts(Status::OK, headers,
-        Some(r.get_header("user-agent").unwrap().as_bytes().to_vec()))
+    let headers = HashMap::from([("Content-Type".to_string(), "text/plain".to_string())]);
+
+    Response::from_parts(
+        Status::OK,
+        headers,
+        Some(r.get_header("user-agent").unwrap().as_bytes().to_vec()),
+    )
 }
 
 fn get_file(r: &RequestContext, dir: &Option<String>) -> Response {
@@ -73,9 +74,10 @@ fn get_file(r: &RequestContext, dir: &Option<String>) -> Response {
     match fs::read(file_path) {
         Ok(content) => Response::from_parts(
             Status::OK,
-            HashMap::from([
-                ("Content-Type".to_string(), "application/octet-stream".to_string())
-            ]),
+            HashMap::from([(
+                "Content-Type".to_string(),
+                "application/octet-stream".to_string(),
+            )]),
             Some(content),
         ),
         Err(_) => not_found(),
@@ -87,7 +89,7 @@ fn post_file(r: &RequestContext, dir: &Option<String>) -> Response {
         Some(d) => d,
         None => return not_found(),
     };
-    
+
     let file_name = r.get_var("file").unwrap();
 
     let mut path = PathBuf::from(dir);
