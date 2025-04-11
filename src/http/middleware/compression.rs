@@ -1,45 +1,13 @@
-use crate::http::encoding::Encoding::{Gzip, Identity};
 use crate::http::encoding::{Encoding, EncodingVal};
-use crate::http::middleware::Next;
-use crate::http::request::RequestContext;
-use crate::http::{Response, ok};
-use anyhow::{Context, anyhow};
+use anyhow::{anyhow, Context};
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::collections::HashMap;
-
-static ACCEPT_ENCODING_RE: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(?P<enc>[\w*\-]+)(?:;\s*q=(?P<q>0(\.\d+)?|1(\.0+)?))?").unwrap());
-
-pub(in crate::http) fn parse_accept_encoding(
-    header: &str,
-) -> anyhow::Result<HashMap<Encoding, EncodingVal>> {
-    ACCEPT_ENCODING_RE
-        .captures_iter(header)
-        .map(|cap| {
-            let encoding = Encoding::try_from(
-                cap.name("enc")
-                    .ok_or(anyhow!("Cant get encoding from header value: {}", header))?
-                    .as_str(),
-            )?;
-
-            let quality = cap
-                .name("q")
-                .map(|m| {
-                    m.as_str()
-                        .parse::<f32>()
-                        .context("Failed to parse quality in header")
-                })
-                .unwrap_or(Ok(1.0))?;
-
-            Ok((encoding, EncodingVal { encoding, quality }))
-        })
-        .collect()
-}
-
-pub trait Middleware: Send + Sync {
-    fn handle(&self, ctx: &mut RequestContext, next: Next) -> Response;
-}
+use strum::ParseError;
+use crate::http::encoding::Encoding::{Gzip, Identity};
+use crate::http::middleware::{Middleware, Next};
+use crate::http::request::RequestContext;
+use crate::http::{ok, Response};
 
 pub struct CompressionMw {}
 
@@ -67,11 +35,12 @@ impl Middleware for CompressionMw {
                 };
 
                 let mut resp = next.run(ctx);
-                resp.headers.insert(
-                    "Content-Encoding".to_string(),
-                    resp_encoding.to_string().to_lowercase(),
-                );
-
+                if resp_encoding != Identity {
+                    resp.headers.insert(
+                        "Content-Encoding".to_string(),
+                        resp_encoding.to_string().to_lowercase(),
+                    );
+                }
                 resp
             }
             Err(e) => {
@@ -79,5 +48,49 @@ impl Middleware for CompressionMw {
                 ok()
             }
         }
+    }
+}
+
+static ACCEPT_ENCODING_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(?P<enc>[\w*\-]+)(?:;\s*q=(?P<q>0(\.\d+)?|1(\.0+)?))?").unwrap());
+
+pub(in crate::http) fn parse_accept_encoding(
+    header: &str,
+) -> anyhow::Result<HashMap<Encoding, EncodingVal>> {
+    ACCEPT_ENCODING_RE
+        .captures_iter(header)
+        .flat_map(|cap| {
+            let encoding = Encoding::try_from(
+                cap.name("enc").unwrap().as_str(),
+            );
+
+            let quality = cap
+                .name("q")
+                .map(|m| {
+                    m.as_str()
+                        .parse::<f32>().unwrap()
+                })
+                .unwrap_or(1.0);
+
+            encoding.map(|encoding| Ok((encoding, EncodingVal { encoding, quality })))
+        })
+        .collect()
+}
+
+
+#[cfg(test)]
+mod test {
+    use crate::http::middleware::compression::ACCEPT_ENCODING_RE;
+
+    #[test]
+    fn test_re() {
+        assert!(ACCEPT_ENCODING_RE.is_match("encoding-1"));
+
+        let cc: Vec<&str> = ACCEPT_ENCODING_RE
+            .captures_iter("encoding-1, gzip")
+            .filter_map(|c| c.name("enc"))
+            .map(|m| m.as_str()).collect();
+
+        assert_eq!(cc, vec!["encoding-1", "gzip"])
     }
 }
