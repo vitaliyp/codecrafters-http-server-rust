@@ -12,8 +12,11 @@ struct Worker {
 impl Worker {
     fn new(id: usize, receiver: Arc<Mutex<Receiver<Job>>>) -> Worker {
         let thread = thread::spawn(move || loop {
-            let job = receiver.lock().unwrap().recv().unwrap();
-            job();
+            let message = receiver.lock().unwrap().recv();
+            match message {
+                Ok(job) => job(),
+                Err(_) => break,
+            }
         });
 
         Worker { id, thread }
@@ -22,7 +25,17 @@ impl Worker {
 
 pub struct ThreadPool {
     workers: Vec<Worker>,
-    sender: Sender<Job>,
+    sender: Option<Sender<Job>>
+}
+
+impl Drop for ThreadPool {
+    fn drop(&mut self) {
+        drop(self.sender.take());
+
+        for worker in &mut self.workers.drain(..) {
+            worker.thread.join().unwrap();
+        }
+    }
 }
 
 impl ThreadPool {
@@ -38,13 +51,13 @@ impl ThreadPool {
             workers.push(Worker::new(id, Arc::clone(&receiver)));
         }
 
-        ThreadPool {workers, sender}
+        ThreadPool {workers, sender: Some(sender)}
     }
     pub fn execute<F>(&self, f: F)
     where
         F: FnOnce() + Send + 'static,
     {
         let job = Box::new(f) as Job;
-        self.sender.send(job).unwrap()
+        self.sender.as_ref().unwrap().send(job).unwrap()
     }
 }
