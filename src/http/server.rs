@@ -2,11 +2,11 @@ use crate::concurrency::ThreadPool;
 use crate::http;
 use crate::http::handler::HandlerFunc;
 use crate::http::method::Method;
-use crate::http::middleware::{Middleware, Next};
 use crate::http::middleware::compression::CompressionMw;
+use crate::http::middleware::{Middleware, Next};
 use crate::http::request::{Request, RequestContext};
-use crate::http::{bad_request, Response, BUFFER_SIZE};
-use anyhow::{anyhow, bail, Context};
+use crate::http::{BUFFER_SIZE, Response, bad_request};
+use anyhow::{Context, anyhow, bail};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
 use std::cmp::min;
@@ -30,6 +30,8 @@ pub struct Server {
     middlewares: Vec<Box<dyn Middleware>>,
 }
 
+static PATTERN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<(?P<var>[a-z][a-z0-9]*)>").unwrap());
+
 impl Server {
     fn new(listener: TcpListener, num_workers: usize) -> Server {
         let mut s = Server {
@@ -48,10 +50,8 @@ impl Server {
         Ok(Server::new(listener, num_workers))
     }
 
-    const PATTERN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"<(?P<var>[a-z][a-z0-9]*)>").unwrap());
-
     pub fn add_handler(&mut self, m: Method, pattern: &str, f: HandlerFunc) {
-        let pattern = Self::PATTERN_RE
+        let pattern = PATTERN_RE
             .replace_all(pattern, |capt: &Captures| {
                 format!(r"(?<{}>[^/?]+)", capt.name("var").unwrap().as_str())
             })
@@ -91,19 +91,34 @@ impl Server {
         println!("accepted new connection: {:?}", stream.peer_addr());
 
         loop {
+            let mut close = false;
+
             let request = Self::read_request(&mut stream);
-            println!("{:?}", request);
+
             let response = match request {
-                Ok(Some(r)) => {self.dispatch(&r)}
-                Ok(None) => {break}
-                Err(_) => bad_request()
+                Ok(Some(r)) => {
+                    close = r
+                        .get_header("Connection")
+                        .map(|v| v.eq("close"))
+                        .unwrap_or(false);
+                    let mut resp = self.dispatch(&r);
+                    if close {
+                        resp.headers.insert("Connection".to_string(), "close".to_string());
+                    }
+                    resp
+                }
+                Ok(None) => break,
+                Err(_) => bad_request(),
             };
 
             stream
                 .write_all(serialize_response(&response).as_ref())
                 .unwrap();
-        }
 
+            if close {
+                break;
+            }
+        }
     }
 
     fn dispatch(&self, req: &Request) -> Response {
@@ -115,7 +130,7 @@ impl Server {
 
         if let Some((handler, Some(capt))) = handler {
             let vars = Self::get_url_vars(handler, capt);
-            let mut req_ctx = RequestContext::from(&req, vars);
+            let mut req_ctx = RequestContext::from(req, vars);
 
             let next = Next {
                 middlewares: self.middlewares.as_ref(),
@@ -148,12 +163,14 @@ impl Server {
 
         // Skip empty lines
         loop {
-            let n_read = rdr.read_line(&mut line_buf).context("Error while reading line")?;
+            let n_read = rdr
+                .read_line(&mut line_buf)
+                .context("Error while reading line")?;
             if n_read == 0 {
-                return Ok(None)
+                return Ok(None);
             }
             if !line_buf.starts_with("\r\n") {
-                break
+                break;
             }
         }
 

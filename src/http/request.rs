@@ -41,3 +41,9 @@ pub struct Request {
     pub headers: HashMap<String, String>,
     pub content: Vec<u8>,
 }
+
+impl Request {
+    pub fn get_header(&self, k: &str) -> Option<&str> {
+        self.headers.get(&k.to_lowercase()).map(|v| v.as_str())
+    }
+}
