@@ -26,6 +26,7 @@ impl Middleware for CompressionMw {
                 };
 
                 let mut resp = next.run(ctx);
+
                 if let Some(c) = &resp.content {
                     if resp_encoding != Identity {
                         resp.headers.insert(
@@ -33,8 +34,8 @@ impl Middleware for CompressionMw {
                             resp_encoding.to_string().to_lowercase(),
                         );
                         let mut encoder =
-                            GzEncoder::new(Vec::with_capacity(c.len()), Compression::new(3));
-                        encoder.write_all(c.as_ref()).unwrap();
+                            GzEncoder::new(Vec::with_capacity(c.len()), Compression::default());
+                        encoder.write_all(c).unwrap();
                         resp.content = Some(encoder.finish().unwrap());
                     }
                 }

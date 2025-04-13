@@ -5,7 +5,7 @@ use crate::http::method::Method;
 use crate::http::middleware::{Middleware, Next};
 use crate::http::middleware::compression::CompressionMw;
 use crate::http::request::{Request, RequestContext};
-use crate::http::{Response, BUFFER_SIZE};
+use crate::http::{bad_request, Response, BUFFER_SIZE};
 use anyhow::{anyhow, bail, Context};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex};
@@ -90,20 +90,23 @@ impl Server {
 
         println!("accepted new connection: {:?}", stream.peer_addr());
 
-        let request = Self::read_request(&mut stream);
+        loop {
+            let request = Self::read_request(&mut stream);
+            println!("{:?}", request);
+            let response = match request {
+                Ok(Some(r)) => {self.dispatch(&r)}
+                Ok(None) => {break}
+                Err(_) => bad_request()
+            };
 
-        let response = if let Ok(request) = request {
-            self.dispatch(request)
-        } else {
-            http::bad_request()
-        };
+            stream
+                .write_all(serialize_response(&response).as_ref())
+                .unwrap();
+        }
 
-        stream
-            .write_all(serialize_response(&response).as_ref())
-            .unwrap();
     }
 
-    fn dispatch(&self, req: Request) -> Response {
+    fn dispatch(&self, req: &Request) -> Response {
         let handler = self
             .handlers
             .iter()
@@ -112,7 +115,7 @@ impl Server {
 
         if let Some((handler, Some(capt))) = handler {
             let vars = Self::get_url_vars(handler, capt);
-            let mut req_ctx = RequestContext::from(req, vars);
+            let mut req_ctx = RequestContext::from(&req, vars);
 
             let next = Next {
                 middlewares: self.middlewares.as_ref(),
@@ -139,13 +142,22 @@ impl Server {
             .collect()
     }
 
-    fn read_request(readable: &mut impl Read) -> anyhow::Result<Request> {
+    fn read_request(readable: &mut impl Read) -> anyhow::Result<Option<Request>> {
         let mut rdr = BufReader::new(readable);
+        let mut line_buf = String::with_capacity(64);
 
-        let mut first_line = String::new();
-        rdr.read_line(&mut first_line)
-            .context("Error while reading line")?;
-        first_line = String::from(first_line.trim_ascii());
+        // Skip empty lines
+        loop {
+            let n_read = rdr.read_line(&mut line_buf).context("Error while reading line")?;
+            if n_read == 0 {
+                return Ok(None)
+            }
+            if !line_buf.starts_with("\r\n") {
+                break
+            }
+        }
+
+        let first_line = String::from(line_buf.trim_ascii());
 
         let first_line_parts: Vec<&str> = first_line.split(" ").collect();
 
@@ -168,17 +180,16 @@ impl Server {
         }
 
         let mut headers: HashMap<String, String> = HashMap::new();
-        let mut line = String::new();
 
         loop {
-            line.clear();
-            let n = rdr.read_line(&mut line).context("Can't read line")?;
+            line_buf.clear();
+            let n = rdr.read_line(&mut line_buf).context("Can't read line")?;
 
-            if n == 0 || line.trim_ascii().is_empty() {
+            if n == 0 || line_buf.trim_ascii().is_empty() {
                 break;
             }
 
-            let (k, v) = line
+            let (k, v) = line_buf
                 .trim_ascii()
                 .split_once(":")
                 .ok_or(anyhow!("Invalid header"))?;
@@ -199,7 +210,7 @@ impl Server {
             headers,
             content,
         };
-        Ok(request)
+        Ok(Some(request))
     }
 
     fn read_content(

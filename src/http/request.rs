@@ -3,14 +3,14 @@ use std::any::{Any, TypeId};
 use std::collections::HashMap;
 
 #[derive(Debug)]
-pub(crate) struct RequestContext {
-    request: Request,
+pub(crate) struct RequestContext<'a> {
+    request: &'a Request,
     extensions: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
     url_vars: HashMap<String, String>,
 }
 
-impl RequestContext {
-    pub fn from(request: Request, url_vars: HashMap<String, String>) -> RequestContext {
+impl RequestContext<'_> {
+    pub fn from(request: &Request, url_vars: HashMap<String, String>) -> RequestContext {
         RequestContext {
             request,
             extensions: HashMap::new(),
@@ -30,7 +30,7 @@ impl RequestContext {
     }
 
     pub fn request(&self) -> &Request {
-        &self.request
+        self.request
     }
 }
 
